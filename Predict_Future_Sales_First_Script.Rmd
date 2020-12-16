@@ -1,0 +1,14 @@
+---
+title: "Predict Future Sales"
+author: Ra'Shawn Howard
+output: html_notebook
+---
+
+# Libraries I Use
+```{r}
+library(tidyverse)
+```
+
+# Load Data
+# Explore/Clean Data
+#
