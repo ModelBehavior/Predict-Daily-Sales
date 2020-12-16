@@ -7,8 +7,54 @@ output: html_notebook
 # Libraries I Use
 ```{r}
 library(tidyverse)
+library(forecast)
+library(feasts)
+library(fable)
+library(tsibble)
+library(lubridate)
 ```
 
 # Load Data
+```{r}
+sales_data <- read_csv("/Users/rashawnhoward/Downloads/sales_train.csv")
+glimpse(sales_data)
+```
+
 # Explore/Clean Data
-#
+The data being from [kaggle]("https://www.kaggle.com/c/competitive-data-science-predict-future-sales") is fairly clean we just need to get the data into the correct format to perform our analysis. The Competetion wanted to predict total sales for each shop, while we will be predicting total sales as a whole. From the glimpse function we can see that the date column is of type chr and needs to be converted to type Date, also item cnt day will need to summed for the different shops on the same date (e.g we will group_by date). The chunck of code below will do this.
+```{r}
+sales_data %>% 
+  mutate(date = dmy(date)) %>% # Change date column to type date
+  group_by(date) %>% 
+  summarise(item_cnt_day = sum(item_cnt_day)) %>% 
+  as_tsibble(index = date) -> sales_data # Make data a time series object (easier to work with)!
+                           # Assign changes to sales data
+```
+
+## visualize data
+The data Doesn't look stationary. We can see a slight trend downward in the recent year. Two higher than normal peeks at the beginning of 2014 and the begining of 2015, I'm not sure what caused these peeks. We can see a cyclic and seasonal pattern in the data as well and should be taken into account when modeling.
+```{r}
+sales_data %>% 
+  ggplot(aes(date,item_cnt_day)) +
+  geom_line() +
+  xlab("Days") +
+  ylab("Number of Products Sold") +
+  ggtitle("Doesn't look Stationary")
+```
+Looking at the ACF plot below we can see that the data has high peeks at 7, 14, 21, and 28. Suggesting that the data is weekly seasonal.
+```{r}
+sales_data %>% 
+  ACF() %>% 
+  autoplot()
+```
+
+```{r}
+?box_cox()
+sales_data %>% 
+  mutate(item_cnt_day = difference(item_cnt_day,7)) %>% 
+  autoplot() + 
+  geom_hline(yintercept = 0, col="red") +
+  xlab("Day") +
+  ylab("Differenced data")
+```
+
