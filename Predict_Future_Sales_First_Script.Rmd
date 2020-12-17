@@ -12,6 +12,7 @@ library(feasts)
 library(fable)
 library(tsibble)
 library(lubridate)
+library(tidymodels)
 ```
 
 # Load Data
@@ -19,9 +20,8 @@ library(lubridate)
 sales_data <- read_csv("/Users/rashawnhoward/Downloads/sales_train.csv")
 glimpse(sales_data)
 ```
-
 # Explore/Clean Data
-The data being from [kaggle]("https://www.kaggle.com/c/competitive-data-science-predict-future-sales") is fairly clean we just need to get the data into the correct format to perform our analysis. The Competetion wanted to predict total sales for each shop, while we will be predicting total sales as a whole. From the glimpse function we can see that the date column is of type chr and needs to be converted to type Date, also item cnt day will need to summed for the different shops on the same date (e.g we will group_by date). The chunck of code below will do this.
+The data being from [kaggle]("https://www.kaggle.com/c/competitive-data-science-predict-future-sales") it fairly clean, we just need to get the data into the correct format to perform our analysis. The Competetion wanted to predict total sales for each shop, while we will be predicting total sales as a whole. From the glimpse function we can see that the date column is of type chr and needs to be converted to type Date, also item cnt day will need to summed for the different shops on the same date (e.g we will group_by date). The chunck of code below will do this.
 ```{r}
 sales_data %>% 
   mutate(date = dmy(date)) %>% # Change date column to type date
@@ -32,7 +32,7 @@ sales_data %>%
 ```
 
 ## visualize data
-The data Doesn't look stationary. We can see a slight trend downward in the recent year. Two higher than normal peeks at the beginning of 2014 and the begining of 2015, I'm not sure what caused these peeks. We can see a cyclic and seasonal pattern in the data as well and should be taken into account when modeling.
+The data Doesn't look stationary. We can see a slight trend downward in the recent year. Two higher than normal peeks at the beginning of 2014 and the begining of 2015, I'm not sure what caused these peeks, but this should be fixed with a tranformation. We can see a cyclic and seasonal pattern in the data as well and should be taken into account when modeling.
 ```{r}
 sales_data %>% 
   ggplot(aes(date,item_cnt_day)) +
@@ -47,14 +47,118 @@ sales_data %>%
   ACF() %>% 
   autoplot()
 ```
-
+We can see the [BoxCox]("https://feasts.tidyverts.org/reference/guerrero.html") fixed the Variance issue from the first plot, and we can see stationarity from second plot. We can also add another difference on to this, looking at the nsdiff and ndiff function we see that the data needs a seasonal difference and a regular difference. 
 ```{r}
-?box_cox()
+lambda <- sales_data %>% # Find Best Lambda Value
+  features(item_cnt_day,features = guerrero) %>% 
+  pull(lambda_guerrero)
+
+sales_data %>% # Apply BoxCox Transformation             # assign to sales data
+  mutate(item_cnt_day = box_cox(item_cnt_day,lambda)) -> sales_data
+
+sales_data %>% # Plot what data looks like now
+  autoplot() +
+  xlab("Day") +
+  ylab("BoxCox Number of Products Sold") +
+  ggtitle("The Variance Issue Is Gone") # still see trend, need to diffference data
+ 
+  
+# What kind of differences do we need?
 sales_data %>% 
+  features(item_cnt_day,unitroot_ndiffs) # We have a trend component
+
+sales_data %>% 
+  features(item_cnt_day,unitroot_nsdiffs) # We have a seasonal component
+
+sales_data %>% # Plot to see if data is stationary
   mutate(item_cnt_day = difference(item_cnt_day,7)) %>% 
   autoplot() + 
   geom_hline(yintercept = 0, col="red") +
   xlab("Day") +
-  ylab("Differenced data")
+  ylab("Differenced(7) BoxCox Number of Products Sold") +
+  ggtitle("Looks Stationary Now")
+
+sales_data %>% # Plot to see if data is stationary (extra difference plot)
+  mutate(item_cnt_day = difference(item_cnt_day,7) %>% difference()) %>% 
+  autoplot() + 
+  geom_hline(yintercept = 0, col="red") +
+  xlab("Day") +
+  ylab("Differenced(7) BoxCox Number of Products Sold") +
+  ggtitle("Looks Stationary Now")
+```
+
+# Split Data
+Make a training and test set
+```{r}
+split <- initial_time_split(sales_data,prop = 0.8)
+test <- testing(split)
+train <- training(split)
+```
+
+# Modeling
+## Picking p and q for SARIMA model
+Looking at the ACF plot below, we see a big lag at 7 this suggest a seasonal MA component. There is also a lag at 28 This might suggest 2 seasonal MA components, but this lag is really small and we may not need this component(we can test different models). We can see some other regular MA components 2 maybe 4.
+```{r}
+train %>% 
+  mutate(item_cnt_day = difference(item_cnt_day,7) %>% difference()) %>% 
+  ACF() %>% 
+  autoplot()
+```
+Looking at the PACF plot below, we can see big lags at 7, 14, 21, and 28 which could suggest 4 seasonal AR componets. Its hard to tell how many regular components could be 2 or more.  
+```{r}
+train %>% 
+  mutate(item_cnt_day = difference(item_cnt_day,7) %>% difference()) %>% 
+  PACF() %>% 
+  autoplot()
+```
+The EACF plot suggest an MA(2) ARMA(2,2)  ARMA(3,1)
+```{r}
+TSA::eacf(train$item_cnt_day)
+```
+## Different models
+Seems my model has a lower AICc score than the automated model
+```{r}
+train %>% # Automated model chosen by auto.arima function
+  model(ARIMA(item_cnt_day,stepwise=FALSE,approximation = FALSE)) %>% 
+  report()
+
+train %>% # My model
+  model(ARIMA(item_cnt_day~pdq(p=2:4,0:2,q=2:4,p_init=2,q_init=2)+PDQ(P=1:4,1,Q=0:2,P_init=1,Q_init=1))) %>% 
+  report()
+```
+
+## Fit
+```{r}
+fit <- train %>% 
+  model(arima_400_011 = ARIMA(item_cnt_day~pdq(4,0,0)+PDQ(0,1,1)),
+        arima_202_210 = ARIMA(item_cnt_day~pdq(2,0,2)+PDQ(2,1,0)),
+        arima_111_111 = ARIMA(item_cnt_day~pdq(1,1,1) + PDQ(1,1,1)),
+        lm1 = ARIMA(item_cnt_day~0+date+pdq(4,0,0)+PDQ(0,1,1)),
+        lm2 = ARIMA(item_cnt_day~0+date+pdq(2,0,2)+PDQ(2,1,0)))
+```
+
+```{r}
+fit %>% 
+  forecast(test) %>% 
+  autoplot(test,level = NULL) + 
+  xlab("Day") +
+  ylab("Number of Products Sold") +
+  ggtitle("Model Fits on New Data")
+```
+Looks like the arima_111_111 model did the best on the test set with RMSE = 0.008234140
+```{r}
+fit %>% 
+  forecast(test) %>% 
+  fabletools::accuracy(test)
+```
+A closer look at the arima_111_111 model on the test data
+```{r}
+train %>% 
+  model(ARIMA(item_cnt_day~pdq(1,1,1)+PDQ(1,1,1))) %>% 
+  forecast(test) %>% 
+  autoplot(test) +
+  xlab("day") +
+  ylab("Number of Products Sold") +
+  ggtitle("Closer Look at ARIMA_111_111 Model")
 ```
 
